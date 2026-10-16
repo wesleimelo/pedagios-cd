@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Pedágios CD · Prestador</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="band">
+  <div class="band-in">
+    <h1>Pedágios CD<span>portal do prestador</span></h1>
+    <div class="inline" id="who" hidden><span id="whoName"></span><button class="btn" id="btnOut">Sair</button></div>
+  </div>
+</header>
+<main class="wrap" id="app"></main>
+
+<dialog id="dlg">
+  <div class="dlg-h"><h3 id="dlgTitle">Viagem</h3><button class="btn sm" id="dlgX" aria-label="Fechar">Fechar ✕</button></div>
+  <div style="padding:14px 18px;max-height:74vh;overflow:auto"><div id="dlgNotice"></div><div id="tfHost"></div></div>
+  <div class="dlg-f"><button class="btn danger" id="dlgDel" hidden>Excluir viagem</button><button class="btn" id="dlgCancel">Cancelar</button><button class="btn primary" id="dlgSave">Enviar</button></div>
+</dialog>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script src="config.js"></script>
+<script src="shared.js"></script>
+<script>
+"use strict";
+let me=null,vehicles=[],regions=[],trips=[],month=monthOf(todayStr()),tf=null,editing=null;
+const app=$('#app'),dlg=$('#dlg');
+
+async function boot(){
+  ensureUI();
+  if(!API){app.innerHTML='<div class="notice bad">O sistema ainda não foi configurado. Preencha o arquivo config.js com os dados do Supabase.</div>';return}
+  try{me=await API.me()}catch(e){me=null}
+  if(!me)return showLogin();
+  if(me.role==='admin'){
+    app.innerHTML=`<div class="card pad narrow"><h2 style="margin-top:0">Você é o coordenador</h2><p>Este portal é para os prestadores. O seu painel fica em outra página.</p><a class="btn primary" href="painel.html">Abrir o painel</a> <button class="btn" id="out2">Sair</button></div>`;
+    $('#out2').onclick=signOut;return;
+  }
+  if(me.role!=='prestador'){
+    app.innerHTML=`<div class="card pad narrow"><h2 style="margin-top:0">Acesso não liberado</h2><p>Seu usuário ainda não foi cadastrado como prestador. Fale com o coordenador.</p><button class="btn" id="out2">Sair</button></div>`;
+    $('#out2').onclick=signOut;return;
+  }
+  $('#who').hidden=false;$('#whoName').textContent=me.name;
+  try{[vehicles,regions]=await Promise.all([API.vehicles(),API.regions()]);await loadTrips()}catch(e){app.innerHTML=`<div class="notice bad">${esc(errText(e))}</div>`;return}
+  draw();
+}
+function showLogin(){
+  $('#who').hidden=true;
+  loginView(app,async(u,p)=>{await API.signIn(u,p);await boot()},'Entrar');
+}
+async function signOut(){try{await API.signOut()}catch(e){}me=null;await boot()}
+$('#btnOut').onclick=signOut;
+async function loadTrips(){trips=await API.trips(month)}
+
+function draw(){
+  const tot=trips.reduce((s,t)=>s+tripTotal(t),0),back=trips.filter(t=>t.status==='devolvido');
+  let h=`<div class="row-between"><h2>Minhas viagens</h2><button class="btn primary" id="btnNew"${vehicles.length?'':' disabled'}>+ Enviar viagem</button></div>`;
+  if(!vehicles.length)h+=`<div class="notice bad">Nenhum veículo está ligado ao seu usuário. Fale com o coordenador.</div>`;
+  h+=`<div class="inline" style="margin:4px 0 10px"><select id="selMonth" aria-label="Mês"></select><input type="number" id="selYear" aria-label="Ano" style="width:90px" min="2020" max="2100"></div>`;
+  for(const t of back)h+=`<div class="notice bad" data-action="open" data-id="${t.id}" style="cursor:pointer"><b>${fshort(t.date)} · ${esc(t.plate)} · ${esc(t.region)}</b> foi devolvida${t.adminNote?': '+esc(t.adminNote):'.'} Toque para corrigir e reenviar.</div>`;
+  if(!trips.length)h+=`<div class="empty">Nenhuma viagem enviada em ${monthLabel(month)}.<br>Toque em “Enviar viagem” para lançar os pedágios e anexar os comprovantes.</div>`;
+  else{
+    h+=`<div class="card"><div class="tbl"><table><tr><th>Data</th><th>Placa</th><th>Região</th><th>Comprovantes</th><th class="num">Total</th><th>Situação</th></tr>`;
+    for(const t of trips)h+=`<tr data-action="open" data-id="${t.id}"><td>${fshort(t.date)}</td><td>${esc(t.plate)}</td><td>${esc(t.region)}</td><td class="muted">${t.receipts.length}</td><td class="num">${brl(tripTotal(t))}</td><td>${pillOf(t.status)}</td></tr>`;
+    h+=`</table></div><div class="total-line"><span>Total de ${monthLabel(month)}</span><span>${brl(tot)}</span></div></div>`;
+  }
+  app.innerHTML=h;
+  mountMonthPicker($('#selMonth'),$('#selYear'),()=>month,async m=>{month=m;await loadTrips();draw()});
+  const nb=$('#btnNew');if(nb)nb.onclick=()=>openForm(null);
+}
+app.addEventListener('click',e=>{const r=e.target.closest('[data-action=open]');if(!r)return;const t=trips.find(x=>x.id===r.dataset.id);if(t)t.status==='confirmado'?openView(t):openForm(t)});
+
+function resetDlg(){if(tf){tf.destroy();tf=null}$('#tfHost').innerHTML='';$('#dlgNotice').innerHTML='';$('#dlgDel').hidden=true;$('#dlgSave').hidden=false;$('#dlgCancel').textContent='Cancelar'}
+dlg.addEventListener('close',()=>{if(tf){tf.destroy();tf=null}});
+$('#dlgX').onclick=$('#dlgCancel').onclick=()=>dlg.close();
+
+function openForm(t){
+  resetDlg();editing=t;
+  $('#dlgTitle').textContent=t?'Corrigir viagem':'Enviar viagem';
+  $('#dlgSave').textContent=t?'Reenviar':'Enviar';
+  if(t&&t.status==='devolvido'&&t.adminNote)$('#dlgNotice').innerHTML=`<div class="notice bad"><b>Motivo da devolução:</b> ${esc(t.adminNote)}</div>`;
+  tf=mountTripForm($('#tfHost'),{vehicles,regions,trip:t,isAdmin:false});
+  $('#dlgDel').hidden=!t;
+  dlg.showModal();
+}
+$('#dlgSave').onclick=async()=>{
+  if(!tf)return;const b=$('#dlgSave'),label=b.textContent;
+  const res=await tf.collect();if(!res)return;
+  res.trip.status='enviado';
+  b.disabled=true;b.textContent='Enviando…';
+  try{
+    await API.saveTrip(res.trip,res.newFiles,res.removed);
+    dlg.close();toast('Viagem enviada. O coordenador vai conferir.');
+    await loadTrips();draw();
+  }catch(e){tf&&tf.setError('Não foi possível enviar: '+errText(e))}
+  finally{b.disabled=false;b.textContent=label}
+};
+$('#dlgDel').onclick=async()=>{
+  if(!editing)return;
+  if(!await ask('Excluir esta viagem e os comprovantes enviados?','Excluir',true))return;
+  try{await API.deleteTrip(editing.id);dlg.close();toast('Viagem excluída');await loadTrips();draw()}catch(e){tf&&tf.setError(errText(e))}
+};
+
+async function openView(t){
+  resetDlg();editing=t;
+  $('#dlgTitle').textContent='Viagem confirmada';
+  $('#dlgSave').hidden=true;$('#dlgCancel').textContent='Fechar';
+  let h=`<p><b>${esc(t.plate)}</b> · ${fdate(t.date)} · ${esc(t.region)}</p><div class="notice" style="background:var(--soft);border-left-color:var(--sign)">Esta viagem já foi confirmada pelo coordenador e não pode mais ser alterada. Se houver erro, fale com ele.</div>`;
+  if(t.mode==='total')h+=`<p>Valor total informado: <b>${brl(t.total)}</b></p>`;
+  else{
+    h+=`<div class="card"><div class="tbl"><table><tr><th></th><th>Praça</th><th>Hora</th><th class="num">Valor</th></tr>`+t.passages.map(p=>`<tr><td>${p.dir}</td><td>${esc(p.plaza)}</td><td>${esc(p.time)}</td><td class="num">${brl(p.value)}</td></tr>`).join('')+`</table></div><div class="total-line"><span>Total</span><span>${brl(tripTotal(t))}</span></div></div>`;
+  }
+  h+=`<div class="strip" id="roImgs">`+t.receipts.map(r=>`<div class="mini" style="width:90px;height:118px"><img data-path="${esc(r.path)}" alt="comprovante"></div>`).join('')+`</div>`;
+  $('#tfHost').innerHTML=h;
+  dlg.showModal();
+  for(const img of $$('#roImgs img')){API.receiptURL(img.dataset.path).then(u=>img.src=u).catch(()=>{})}
+}
+boot();
+</script>
+</body>
+</html>

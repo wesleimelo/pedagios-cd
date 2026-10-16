@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Pedágios CD · Painel</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="band">
+  <div class="band-in">
+    <h1>Pedágios CD<span>painel do coordenador</span></h1>
+    <div class="inline" id="bar" hidden>
+      <select id="selMonth" aria-label="Mês"></select>
+      <input type="number" id="selYear" aria-label="Ano" min="2020" max="2100" style="width:84px">
+      <button class="btn" id="btnOut">Sair</button>
+    </div>
+  </div>
+</header>
+<main class="wrap">
+  <div class="tabs" role="tablist" id="tabs" hidden>
+    <button class="tab" role="tab" data-tab="trips" id="tab-trips">1 · Viagens</button>
+    <button class="tab" role="tab" data-tab="check" id="tab-check">2 · Conferir</button>
+    <button class="tab" role="tab" data-tab="msg" id="tab-msg">3 · Mensagem e PDF</button>
+    <button class="tab" role="tab" data-tab="setup" id="tab-setup">Cadastros</button>
+  </div>
+  <section id="view"></section>
+</main>
+
+<dialog id="dlg">
+  <div class="dlg-h"><h3 id="dlgTitle">Viagem</h3><button class="btn sm" id="dlgX" aria-label="Fechar">Fechar ✕</button></div>
+  <div class="ed-grid" id="edGrid">
+    <div class="ed-left"><div id="viewer"></div><div class="strip" id="viewThumbs"></div></div>
+    <div class="ed-right"><div id="dlgNotice"></div><div id="tfHost"></div></div>
+  </div>
+  <div class="dlg-f">
+    <button class="btn danger" id="dlgDel" hidden>Excluir</button>
+    <button class="btn" id="dlgRet" hidden>Devolver ao prestador</button>
+    <button class="btn" id="dlgCancel">Fechar</button>
+    <button class="btn" id="dlgSave">Salvar</button>
+    <button class="btn primary" id="dlgOk">Confirmar</button>
+  </div>
+</dialog>
+
+<dialog id="retDlg" style="max-width:480px">
+  <div style="padding:18px">
+    <p style="margin:0 0 10px"><b>Devolver ao prestador</b></p>
+    <div class="field"><label for="retNote">O que ele precisa corrigir?</label><textarea id="retNote" rows="3" style="width:100%" placeholder="Ex.: falta o comprovante da volta"></textarea></div>
+    <div class="inline" style="justify-content:flex-end"><button class="btn" id="retNo">Cancelar</button><button class="btn primary" id="retOk">Devolver</button></div>
+  </div>
+</dialog>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="config.js"></script>
+<script src="shared.js"></script>
+<script>
+"use strict";
+let me=null,vehicles=[],regions=[],prestadores=[],settings={},trips=[],month=monthOf(todayStr());
+let tab='trips',filter='all',includePending=false,tf=null,editing=null,obsT=null;
+const view=$('#view'),dlg=$('#dlg');
+
+/* ---------- entrada ---------- */
+async function boot(){
+  ensureUI();
+  if(!API){view.innerHTML='<div class="notice bad">O sistema ainda não foi configurado. Preencha o arquivo config.js com os dados do Supabase.</div>';return}
+  try{me=await API.me()}catch(e){me=null}
+  if(!me)return showLogin();
+  if(me.role!=='admin'){
+    await API.signOut().catch(()=>{});
+    $('#bar').hidden=true;$('#tabs').hidden=true;
+    loginView(view,async(u,p)=>{await API.signIn(u,p);await boot()},'Painel do coordenador');
+    $('#lgErr').textContent='Este usuário não é coordenador. Prestadores entram pela outra página.';
+    return;
+  }
+  $('#bar').hidden=false;$('#tabs').hidden=false;
+  mountMonthPicker($('#selMonth'),$('#selYear'),()=>month,async m=>{month=m;await reload();render()});
+  try{await loadBase();await reload()}catch(e){view.innerHTML=`<div class="notice bad">${esc(errText(e))}</div>`;return}
+  render();
+}
+function showLogin(){$('#bar').hidden=true;$('#tabs').hidden=true;loginView(view,async(u,p)=>{await API.signIn(u,p);await boot()},'Painel do coordenador')}
+$('#btnOut').onclick=async()=>{try{await API.signOut()}catch(e){}me=null;await boot()};
+async function loadBase(){[vehicles,regions,prestadores,settings]=await Promise.all([API.vehicles(),API.regions(),API.prestadores(),API.settings()])}
+async function reload(){trips=await API.trips(month)}
+const included=()=>includePending?trips:trips.filter(t=>t.status==='confirmado');
+const pendingCount=()=>trips.filter(t=>t.status!=='confirmado').length;
+
+/* ---------- abas ---------- */
+$('#tabs').addEventListener('click',e=>{const b=e.target.closest('[data-tab]');if(b){tab=b.dataset.tab;render()}});
+function render(){
+  const W=conferir(trips,vehicles).filter(w=>w.lvl==='warn'),toConfirm=trips.filter(t=>t.status==='enviado').length;
+  $('#tab-trips').innerHTML=`1 · Viagens (${trips.length})${toConfirm?`<span class="badge">${toConfirm} a confirmar</span>`:''}`;
+  $('#tab-check').innerHTML=`2 · Conferir<span class="badge ${W.length?'':'ok'}">${W.length||'✓'}</span>`;
+  $$('.tab').forEach(b=>b.setAttribute('aria-selected',b.dataset.tab===tab));
+  view.innerHTML=tab==='trips'?viewTrips():tab==='check'?viewCheck():tab==='msg'?viewMsg():viewSetup();
+  if(tab==='msg')$('#msg').value=makeMsg();
+}
+
+function viewTrips(){
+  const shown=trips.filter(t=>filter==='all'||t.status===filter);
+  let h=`<div class="row-between"><h2>Viagens de ${monthLabel(month)}</h2><button class="btn primary" data-act="new">+ Lançar viagem</button></div>`;
+  h+=`<div class="chips" style="margin-bottom:8px">`+[['all','Todas'],['enviado','A confirmar'],['confirmado','Confirmadas'],['devolvido','Devolvidas']].map(([k,l])=>`<button class="chip" data-act="filter" data-k="${k}" aria-pressed="${filter===k}">${l}</button>`).join('')+`</div>`;
+  const plates=platesOrder(vehicles,shown);
+  if(!plates.length)h+=`<div class="empty">Nenhuma viagem ${filter==='all'?'neste mês ainda':'nesta situação'}.<br>Os prestadores enviam pelo portal; você também pode lançar por eles.</div>`;
+  for(const pl of plates){
+    const ts=shown.filter(t=>t.plate===pl),sum=ts.reduce((s,t)=>s+tripTotal(t),0),v=vehicles.find(x=>x.plate===pl);
+    h+=`<div class="card"><div class="card-h"><b>${esc(vehicleName(vehicles,pl))}</b><span class="muted">${esc(v?.prestador||'')}</span><span class="sum">${brl(sum)}</span></div><div class="tbl"><table>`;
+    for(const t of ts){
+      const i=t.passages.filter(p=>p.dir==='Ida').length,vv=t.passages.filter(p=>p.dir==='Volta').length;
+      h+=`<tr data-action="open" data-id="${t.id}"><td class="muted" style="width:64px">${fshort(t.date)}</td><td>${esc(t.region)}</td><td class="muted">${t.mode==='total'?'valor único':`${i} ida · ${vv} volta`}</td><td class="muted">${t.receipts.length?'print ×'+t.receipts.length:'sem print'}</td><td class="num">${brl(tripTotal(t))}</td><td>${pillOf(t.status)}</td><td class="acts">${t.status==='enviado'?`<button class="btn sm primary" data-act="quick-ok" data-id="${t.id}">Confirmar</button>`:''}</td></tr>`;
+    }
+    h+=`</table></div></div>`;
+  }
+  return h;
+}
+view.addEventListener('click',async e=>{
+  const a=e.target.closest('[data-act]');
+  if(a){
+    const id=a.dataset.id;
+    switch(a.dataset.act){
+      case 'new':openEditor(null);break;
+      case 'filter':filter=a.dataset.k;render();break;
+      case 'quick-ok':e.stopPropagation();await quickConfirm(id);break;
+      case 'toggle-pending':includePending=!includePending;render();break;
+      case 'copy-recip':copyText(settings.recipients||'');break;
+      case 'copy-subj':copyText($('#subj').value);break;
+      case 'copy-msg':copyText($('#msg').value);break;
+      case 'regen':$('#msg').value=makeMsg();toast('Texto regerado');break;
+      case 'pdf-all':await pdf(platesOrder(vehicles,included()),a);break;
+      case 'pdf-one':await pdf([a.dataset.plate],a);break;
+      case 'save-texts':await saveTexts();break;
+      case 'save-pres':await savePres(a.dataset.id);break;
+      case 'veh-add':$('#vehRows').insertAdjacentHTML('beforeend',vehRow({}));break;
+      case 'veh-save':await saveVeh();break;
+      case 'reg-save':await saveReg();break;
+    }
+    return;
+  }
+  const r=e.target.closest('[data-action=open]');if(r){const t=trips.find(x=>x.id===r.dataset.id);if(t)openEditor(t)}
+});
+view.addEventListener('input',e=>{
+  if(e.target.id==='obs'){const v=e.target.value;settings['obs:'+month]=v;$('#msg').value=makeMsg();clearTimeout(obsT);obsT=setTimeout(()=>API.setSetting('obs:'+month,v).catch(er=>toast(errText(er))),700)}
+});
+async function quickConfirm(id){try{await API.setStatus(id,'confirmado',null);toast('Viagem confirmada');await reload();render()}catch(e){toast(errText(e))}}
+
+/* ---------- conferir ---------- */
+function viewCheck(){
+  const W=conferir(trips,vehicles),plates=platesOrder(vehicles,trips);let grand=0;
+  let h=`<h2>Resumo por veículo</h2><div class="card"><div class="tbl"><table><tr><th>Veículo</th><th>Prestador</th><th class="num">Viagens</th><th class="num">Confirmadas</th><th class="num">Total</th></tr>`;
+  for(const pl of plates){const ts=trips.filter(t=>t.plate===pl),sum=ts.reduce((s,t)=>s+tripTotal(t),0);grand+=sum;const v=vehicles.find(x=>x.plate===pl);
+    h+=`<tr><td><b>${esc(vehicleName(vehicles,pl))}</b></td><td class="muted">${esc(v?.prestador||'')}</td><td class="num">${ts.length}</td><td class="num">${ts.filter(t=>t.status==='confirmado').length}</td><td class="num"><b>${brl(sum)}</b></td></tr>`}
+  h+=`</table></div><div class="total-line"><span>Total do mês</span><span>${brl(grand)}</span></div></div>`;
+  h+=`<h2>Pontos de atenção <small>${W.length}</small></h2>`;
+  h+=W.length?`<ul class="warns">`+W.map(w=>`<li class="${w.lvl}" data-action="open" data-id="${w.id}"><span>${esc(w.text)}</span><span class="muted">abrir ›</span></li>`).join('')+`</ul>`:`<div class="okbox">Tudo certo: nenhum ponto de atenção neste mês.</div>`;
+  const map=new Map();
+  for(const t of trips)if(t.mode==='detail')for(const p of t.passages){const e=map.get(p.plaza)||{n:0,sum:0};e.n++;e.sum+=p.value;map.set(p.plaza,e)}
+  if(map.size){
+    h+=`<h2>Por praça / base <small>viagens com valor único não entram</small></h2><div class="card"><div class="tbl"><table><tr><th>Praça</th><th class="num">Passagens</th><th class="num">Total</th></tr>`;
+    for(const [k,e] of [...map].sort((a,b)=>b[1].sum-a[1].sum))h+=`<tr><td>${esc(k)}</td><td class="num">${e.n}</td><td class="num">${brl(e.sum)}</td></tr>`;
+    h+=`</table></div></div>`;
+  }
+  return h;
+}
+
+/* ---------- mensagem e PDF ---------- */
+function makeMsg(){return buildMessage({month,trips:included(),vehicles,intro:settings.intro||'',recipients:settings.recipients||'',obs:settings['obs:'+month]||''})}
+function viewMsg(){
+  const pend=pendingCount(),plates=platesOrder(vehicles,included());
+  let h=`<h2>E-mail de ${monthLabel(month)}</h2>`;
+  if(pend)h+=`<div class="notice"><b>${pend}</b> viagem(ns) ainda não confirmada(s) ${includePending?'<b>entram</b>':'ficam <b>fora</b>'} da mensagem e do PDF. <button class="btn sm" data-act="toggle-pending">${includePending?'Tirar não confirmadas':'Incluir mesmo assim'}</button></div>`;
+  h+=`<div class="field"><label for="recip">Destinatários</label><div class="inline"><input type="text" id="recip" value="${esc(settings.recipients||'')}" readonly><button class="btn" data-act="copy-recip">Copiar</button></div></div>`;
+  h+=`<div class="field"><label for="subj">Assunto</label><div class="inline"><input type="text" id="subj" value="${esc('Pedágios CD - '+monthLabel(month))}"><button class="btn" data-act="copy-subj">Copiar</button></div></div>`;
+  h+=`<div class="field"><label for="obs">Observação do mês (opcional, entra como “Obs:”)</label><input type="text" id="obs" value="${esc(settings['obs:'+month]||'')}" placeholder="Ex.: Nos comprovantes do caminhão ele acabou molhando, porém consegui conferir data, localização, valor e horário"></div>`;
+  h+=`<div class="field"><label for="msg">Mensagem</label><textarea id="msg" spellcheck="false"></textarea></div>`;
+  h+=`<div class="inline"><button class="btn primary" data-act="copy-msg">Copiar mensagem</button><button class="btn" data-act="regen">Regerar texto</button></div>`;
+  h+=`<h2>PDF dos comprovantes</h2><div class="inline"><button class="btn primary" data-act="pdf-all">Baixar PDF único</button>`+plates.map(p=>`<button class="btn" data-act="pdf-one" data-plate="${esc(p)}">Só ${esc(p)}</button>`).join('')+`</div>`;
+  h+=`<p class="hint">Uma página por comprovante, na ordem de placa e data, com cabeçalho identificando a viagem.</p>`;
+  return h;
+}
+async function pdf(plates,btn){
+  const old=btn.textContent;btn.disabled=true;
+  try{
+    const r=await makePdf({month,trips:included(),vehicles,plates,onProgress:(i,n)=>{btn.textContent=`Montando ${i}/${n}…`}});
+    if(!r)toast('Nenhum comprovante nas viagens incluídas.');else{download(r.blob,r.name);toast('PDF gerado')}
+  }catch(e){toast(errText(e))}finally{btn.disabled=false;btn.textContent=old}
+}
+
+/* ---------- editor da viagem ---------- */
+let recSel=0,recUrls=[];
+async function drawViewer(){
+  const rs=editing?editing.receipts:[];
+  if(!rs.length){$('#viewer').innerHTML=`<div class="none">Sem comprovante anexado.</div>`;$('#viewThumbs').innerHTML='';return}
+  if(recSel>=rs.length)recSel=0;
+  $('#viewThumbs').innerHTML=rs.map((r,i)=>`<div class="mini ${i===recSel?'sel':''}" data-rec="${i}"><img data-p="${esc(r.path)}" alt="comprovante ${i+1}"></div>`).join('');
+  for(const im of $$('#viewThumbs img')){API.receiptURL(im.dataset.p).then(u=>{im.src=u;if(+im.closest('.mini').dataset.rec===recSel)$('#viewer').innerHTML=`<img src="${u}" alt="comprovante" title="Clique para ampliar ou reduzir">`}).catch(()=>{})}
+}
+$('#viewThumbs').addEventListener('click',e=>{const m=e.target.closest('[data-rec]');if(m){recSel=+m.dataset.rec;drawViewer()}});
+$('#viewer').addEventListener('click',e=>{if(e.target.tagName==='IMG')e.target.classList.toggle('full')});
+
+function openEditor(t){
+  editing=t;recSel=0;
+  $('#dlgTitle').textContent=t?`${t.plate} · ${fshort(t.date)} · ${t.region}`:'Lançar viagem pelo prestador';
+  $('#dlgNotice').innerHTML=t?`<p style="margin:0 0 10px">${pillOf(t.status)} <span class="muted">enviada em ${new Date(t.createdAt).toLocaleString('pt-BR')}</span></p>${t.note?`<div class="notice"><b>Observação do prestador:</b> ${esc(t.note)}</div>`:''}${t.status==='devolvido'&&t.adminNote?`<div class="notice bad"><b>Devolvida:</b> ${esc(t.adminNote)}</div>`:''}`:'';
+  if(tf)tf.destroy();
+  tf=mountTripForm($('#tfHost'),{vehicles,regions,trip:t,isAdmin:true});
+  $('#edGrid').classList.toggle('single',!t);$('.ed-left').hidden=!t;
+  $('#dlgDel').hidden=!t;$('#dlgRet').hidden=!t||t.status==='devolvido';
+  $('#dlgOk').textContent=t&&t.status==='confirmado'?'Salvar e manter confirmada':'Confirmar';$('#dlgSave').hidden=!!t&&t.status==='confirmado';
+  drawViewer();dlg.showModal();
+}
+dlg.addEventListener('close',()=>{if(tf){tf.destroy();tf=null}});
+$('#dlgX').onclick=$('#dlgCancel').onclick=()=>dlg.close();
+async function persist(newStatus){
+  const res=await tf.collect();if(!res)return false;
+  if(newStatus)res.trip.status=newStatus;
+  const id=await API.saveTrip(res.trip,res.newFiles,res.removed);
+  if(newStatus==='confirmado')await API.setStatus(id,'confirmado',null);
+  return true;
+}
+async function run(btn,fn,msg){
+  const old=btn.textContent;btn.disabled=true;btn.textContent='Salvando…';
+  try{if(await fn()){dlg.close();toast(msg);await reload();render()}}
+  catch(e){tf&&tf.setError(errText(e))}finally{btn.disabled=false;btn.textContent=old}
+}
+$('#dlgSave').onclick=()=>run($('#dlgSave'),()=>persist(null),'Alterações salvas');
+$('#dlgOk').onclick=()=>run($('#dlgOk'),()=>persist(editing&&editing.status==='confirmado'?null:'confirmado'),'Viagem confirmada');
+$('#dlgDel').onclick=async()=>{
+  if(!editing||!await ask('Excluir esta viagem e os comprovantes dela? Isso não pode ser desfeito.','Excluir',true))return;
+  try{await API.deleteTrip(editing.id);dlg.close();toast('Viagem excluída');await reload();render()}catch(e){tf&&tf.setError(errText(e))}
+};
+$('#dlgRet').onclick=()=>{$('#retNote').value='';$('#retDlg').showModal()};
+$('#retNo').onclick=()=>$('#retDlg').close();
+$('#retOk').onclick=async()=>{
+  const note=$('#retNote').value.trim();if(!note){$('#retNote').focus();return}
+  try{await API.setStatus(editing.id,'devolvido',note);$('#retDlg').close();dlg.close();toast('Devolvida ao prestador');await reload();render()}catch(e){toast(errText(e))}
+};
+
+/* ---------- cadastros ---------- */
+function vehRow(v){return `<div class="set-row" data-row="v"><input type="text" data-k="plate" value="${esc(v.plate||'')}" placeholder="Placa" aria-label="Placa" ${v.plate?'readonly':''}><select data-k="kind" aria-label="Tipo"><option${v.kind==='VAN'?' selected':''}>VAN</option><option${v.kind==='CAMINHÃO'?' selected':''}>CAMINHÃO</option><option${v.kind==='CARRO'?' selected':''}>CARRO</option></select><select data-k="prestadorId" aria-label="Prestador"><option value="">Sem prestador</option>${prestadores.map(p=>`<option value="${p.id}"${p.id===v.prestadorId?' selected':''}>${esc(p.name)}</option>`).join('')}</select><label class="inline" style="gap:4px"><input type="checkbox" data-k="active" ${v.active===false?'':'checked'}> ativo</label></div>`}
+function viewSetup(){
+  let h=`<h2>Textos do e-mail</h2><div class="field"><label for="sIntro">Abertura</label><textarea id="sIntro" rows="3" style="width:100%">${esc(settings.intro||'')}</textarea></div><div class="field"><label for="sRecip">Destinatários (para copiar)</label><input type="text" id="sRecip" value="${esc(settings.recipients||'')}"></div><button class="btn primary" data-act="save-texts">Salvar textos</button>`;
+  h+=`<h2>Prestadores</h2><p class="hint" style="margin-top:0">Para criar o acesso de um prestador novo, crie o usuário no Supabase (veja o README) e depois ajuste nome e CNPJ aqui.</p>`;
+  h+=prestadores.map(p=>`<div class="set-row p" data-pres="${p.id}"><input type="text" data-k="name" value="${esc(p.name)}" aria-label="Nome"><input type="text" data-k="cnpj" value="${esc(p.cnpj)}" placeholder="CNPJ" aria-label="CNPJ"><button class="btn sm" data-act="save-pres" data-id="${p.id}">Salvar</button></div>`).join('')||`<div class="empty">Nenhum prestador cadastrado ainda.</div>`;
+  h+=`<h2>Veículos</h2><div id="vehRows">${vehicles.map(vehRow).join('')}</div><div class="inline"><button class="btn sm" data-act="veh-add">+ veículo</button><button class="btn primary" data-act="veh-save">Salvar veículos</button></div>`;
+  h+=`<h2>Regiões e praças</h2><div class="field"><label for="regText">Uma região por bloco. Ao escolher a região, estas praças entram preenchidas (saindo de Maringá)</label><textarea id="regText" rows="14" style="width:100%;font-family:var(--f-mono);font-size:13px">${esc(regionsToText(regions))}</textarea><span class="hint">Formato: [Região] e, abaixo, linhas “Ida: praça” e “Volta: praça”. Região sem praças permite informar só o valor total.</span></div><button class="btn primary" data-act="reg-save">Salvar regiões</button>`;
+  return h;
+}
+async function saveTexts(){try{await API.setSetting('intro',$('#sIntro').value.trim());await API.setSetting('recipients',$('#sRecip').value.trim());settings.intro=$('#sIntro').value.trim();settings.recipients=$('#sRecip').value.trim();toast('Textos salvos')}catch(e){toast(errText(e))}}
+async function savePres(id){const row=$(`[data-pres="${id}"]`);try{await API.savePrestador({id,name:$('[data-k=name]',row).value.trim(),cnpj:$('[data-k=cnpj]',row).value.trim()});await loadBase();toast('Prestador salvo')}catch(e){toast(errText(e))}}
+async function saveVeh(){
+  const list=$$('#vehRows [data-row=v]').map(r=>({plate:normPlate($('[data-k=plate]',r).value),kind:$('[data-k=kind]',r).value,prestadorId:$('[data-k=prestadorId]',r).value||null,active:$('[data-k=active]',r).checked})).filter(v=>v.plate);
+  try{await API.saveVehicles(list);await loadBase();render();toast('Veículos salvos')}catch(e){toast(errText(e))}
+}
+async function saveReg(){
+  const rs=textToRegions($('#regText').value);
+  if(!await ask('Salvar as regiões do jeito que estão no texto? As viagens já enviadas não mudam.','Salvar'))return;
+  try{await API.saveRegions(rs);await loadBase();render();toast('Regiões salvas')}catch(e){toast(errText(e))}
+}
+boot();
+</script>
+</body>
+</html>
